@@ -1,0 +1,64 @@
+name: Build Web/HTML APK
+run-name: Build ${{ github.event.inputs.jobId }}
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID from bot'
+        required: true
+      userId:
+        description: 'User ID'
+        required: false
+        default: '0'
+      payload:
+        description: 'Build payload (JSON)'
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      - name: Prepare Gradle wrapper
+        run: |
+          set -e
+          mkdir -p /tmp/wrap && cd /tmp/wrap
+          touch settings.gradle
+          gradle wrapper --gradle-version 8.9 --no-daemon
+      - name: Generate Android project
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAYLOAD: ${{ github.event.inputs.payload }}
+        run: |
+          set -e
+          printf '%s' "$PAYLOAD" > payload.json
+          python3 scripts/gen_webapk.py payload.json /tmp/webapp
+          cp -r /tmp/wrap/gradlew /tmp/wrap/gradle /tmp/webapp/
+          chmod +x /tmp/webapp/gradlew
+      - name: Create keystore
+        run: |
+          keytool -genkeypair -v -keystore /tmp/webapp/ks.jks -storepass android -keypass android \
+            -alias key -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=WebApp, O=Build, C=US"
+      - name: Build APK
+        working-directory: /tmp/webapp
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+      - name: Locate APK
+        run: |
+          APK_PATH=$(find /tmp/webapp/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::APK tidak ditemukan setelah build."
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.jobId }}
+          path: ${{ env.APK_PATH }}
+          retention-days: 1
