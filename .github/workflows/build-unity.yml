@@ -1,0 +1,89 @@
+name: Build Unity APK
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID from Bot'
+        required: true
+      userId:
+        description: 'User ID'
+        required: true
+      payload:
+        description: 'Build Payload (JSON)'
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Check Unity license secret
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        run: |
+          if [ -z "$UNITY_LICENSE" ] && [ -z "$UNITY_SERIAL" ]; then
+            echo "::error::Secret UNITY_LICENSE (atau UNITY_SERIAL) belum diisi di repo worker ini. Isi di Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+      - name: Prepare Project
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo '${{ github.event.inputs.payload }}' > payload.json
+          ASSET_URL=$(jq -r '.zipAssetUrl // .url // empty' payload.json)
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::Tidak ada url di payload."
+            exit 1
+          fi
+          rm -rf project project.zip
+          mkdir -p project
+          if [[ "$ASSET_URL" == *"api.github.com"* ]]; then
+            curl -fL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream" -o project.zip "$ASSET_URL"
+          else
+            curl -fL -o project.zip "$ASSET_URL"
+          fi
+          unzip -q project.zip -d project
+          VERSION_FILE=$(find project -maxdepth 5 -type f -path "*/ProjectSettings/ProjectVersion.txt" | head -n 1)
+          if [ -z "$VERSION_FILE" ]; then
+            echo "::error::ProjectSettings/ProjectVersion.txt tidak ditemukan di dalam ZIP. Pastikan ini project Unity yang valid (folder Assets, Packages, ProjectSettings)."
+            find project -maxdepth 3
+            exit 1
+          fi
+          PROJECT_ROOT=$(dirname "$(dirname "$VERSION_FILE")")
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "Detected Unity project root: $PROJECT_ROOT"
+          cat "$VERSION_FILE"
+      - name: Build Unity Android
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          projectPath: ${{ env.PROJECT_ROOT }}
+          targetPlatform: Android
+          androidExportType: androidPackage
+          allowDirtyBuild: true
+      - name: Locate APK
+        run: |
+          set -e
+          APK_PATH=$(find . -type f -name "*.apk" -path "*build*" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::File .apk tidak ditemukan setelah build Unity."
+            find . -maxdepth 4 -name "build" -type d || true
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "Found APK at: $APK_PATH"
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.jobId }}
+          path: ${{ env.APK_PATH }}
